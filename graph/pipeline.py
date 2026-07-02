@@ -1,3 +1,8 @@
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+
 from langgraph.graph import StateGraph, END
 from langgraph.constants import Send
 from graph.state import AgentState
@@ -12,6 +17,20 @@ from graph.nodes import (
     writer_node,
     graceful_degrade_node
 )
+
+
+def _get_max_parallel_searches() -> int:
+    """Read MAX_PARALLEL_SEARCHES from env. Defaults to 5 (planner targets 3-5 sub-queries)."""
+    raw = os.getenv("MAX_PARALLEL_SEARCHES", "5")
+    try:
+        value = int(raw)
+    except ValueError:
+        print(f"MAX_PARALLEL_SEARCHES={raw!r} is not a valid integer, falling back to 5")
+        return 5
+    if value < 1:
+        print(f"MAX_PARALLEL_SEARCHES={value} must be >= 1, falling back to 5")
+        return 5
+    return value
 
 
 def build_graph():
@@ -40,8 +59,15 @@ def build_graph():
         if not state.plan or not state.plan.sub_queries:
             return "merge_searches"
         
+        max_searches = _get_max_parallel_searches()
+        sub_queries = state.plan.sub_queries
+        if len(sub_queries) > max_searches:
+            print(f"PLANNER: plan has {len(sub_queries)} sub-queries, "
+                  f"only searching the first {max_searches} "
+                  f"(set MAX_PARALLEL_SEARCHES in .env to change)")
+        
         sends = []
-        for sq in state.plan.sub_queries[:3]:
+        for sq in sub_queries[:max_searches]:
             # Pass sub-query as research_question in a partial state
             sends.append(Send("searcher", AgentState(
                 run_id=state.run_id,

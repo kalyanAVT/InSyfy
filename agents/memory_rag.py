@@ -1,5 +1,6 @@
 import os
 from typing import List
+from uuid import uuid4
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -88,8 +89,12 @@ class MemoryRAGAgent:
         chunks = []
         for item in top_final:
             meta = item["metadata"]
+            result_id = item["result"].get("id")
+            if not result_id:
+                result_id = str(uuid4())
+                print(f"MEMORY_RAG: Qdrant result missing 'id', generated fallback {result_id}")
             chunks.append(Chunk(
-                chunk_id=item["result"].get("id", "unknown"),
+                chunk_id=result_id,
                 text=item["text"],
                 metadata=ChunkMetadata(
                     source_url=meta.get("source_url", ""),

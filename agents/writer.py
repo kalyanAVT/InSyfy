@@ -1,4 +1,5 @@
 import os
+import uuid
 from typing import List, Dict, Any
 from dotenv import load_dotenv
 
@@ -20,9 +21,19 @@ class WriterAgent:
             return self._format_decline(state)
         return self._format_report(state)
     
+    @staticmethod
+    def _confidence_bar(score: float, width: int = 10) -> str:
+        """Render a confidence score as a filled/empty block bar, e.g. '▓▓▓▓▓▓▓▓░░ 0.82'."""
+        filled = max(0, min(width, round(score * width)))
+        bar = "▓" * filled + "░" * (width - filled)
+        return f"`{bar}` {score:.2f}"
+
     def _format_report(self, state: AgentState) -> str:
         synthesis = state.synthesis
         critique = state.critique
+        
+        # Build citation map FIRST — needed by findings
+        citation_map = self._build_citation_map(state)
         
         # Safe quality score formatting
         quality_str = f"{critique.quality_score:.2f}" if critique else "N/A"
@@ -53,11 +64,28 @@ class WriterAgent:
         
         if synthesis:
             for i, finding in enumerate(synthesis.key_findings, 1):
+                # Build deduped footnote numbers from supporting chunks —
+                # several chunks often share one source, so we collapse
+                # them to unique citation numbers instead of listing every
+                # chunk (and instead of repeating full titles per finding).
+                seen_nums = set()
+                footnotes = []
+                for chunk_id in (finding.supporting_chunks or []):
+                    info = citation_map.get(chunk_id)
+                    if info and info["num"] not in seen_nums:
+                        seen_nums.add(info["num"])
+                        footnotes.append(info["num"])
+                footnotes.sort()
+
                 lines.append(f"### Finding {i}: {finding.claim}")
-                conf_str = f"{finding.confidence:.2f}" if finding.confidence is not None else "N/A"
+                conf_str = (
+                    self._confidence_bar(finding.confidence)
+                    if finding.confidence is not None else "N/A"
+                )
                 lines.append(f"- Confidence: {conf_str}")
-                if finding.supporting_chunks:
-                    lines.append(f"- Supported by chunks: {', '.join(finding.supporting_chunks[:3])}")
+                if footnotes:
+                    refs = " ".join(f"[{n}]" for n in footnotes)
+                    lines.append(f"- Sources: {refs}")
                 if finding.contradictions:
                     lines.append(f"- ⚠️ Contradictions: {'; '.join(finding.contradictions)}")
                 lines.append("")
@@ -70,11 +98,12 @@ class WriterAgent:
             lines.append("\n**Warning:** Quality threshold not met after maximum retries.")
         lines.append("")
         
-        # Sources
+        # Sources (numbered footnotes for reference)
         lines.extend(["## Sources", ""])
-        citation_map = self._build_citation_map(state)
-        for cid, info in sorted(citation_map.items()):
-            lines.append(f"[^{cid}]: {info['title']} — {info['url']}")
+        unique_citations = {info["num"]: info for info in citation_map.values()}
+        for num in sorted(unique_citations):
+            info = unique_citations[num]
+            lines.append(f"[{info['num']}] {info['title']} — {info['url']}")
         
         # Methodology
         total_chunks = sum(len(r.chunks) for r in state.search_results) + len(state.rag_chunks)
@@ -114,30 +143,39 @@ This means the system cannot produce a reliable, grounded answer.
 - Try a different topic with more available sources
 """
     
-    def _build_citation_map(self, state: AgentState) -> Dict[str, Dict[str, str]]:
-        """Map chunk IDs to citation numbers."""
-        citations = {}
+    def _build_citation_map(self, state: AgentState) -> Dict[str, Dict[str, Any]]:
+        """Map chunk IDs to citation numbers.
+
+        Citations are deduped by source_url, not chunk_id: several chunks
+        commonly come from the same page, and each one should point at the
+        same footnote rather than minting a new numbered source every time.
+        """
+        citations: Dict[str, Dict[str, Any]] = {}   # chunk_id -> citation info
+        url_to_citation: Dict[str, Dict[str, Any]] = {}  # source_url -> citation info
         counter = 1
-        
-        for result in state.search_results:
-            for chunk in result.chunks:
-                if chunk.chunk_id not in citations:
-                    citations[chunk.chunk_id] = {
-                        "num": counter,
-                        "title": chunk.metadata.source_title or "Source",
-                        "url": chunk.metadata.source_url
-                    }
-                    counter += 1
-        
-        for chunk in state.rag_chunks:
-            if chunk.chunk_id not in citations:
-                citations[chunk.chunk_id] = {
+
+        def _register(chunk):
+            nonlocal counter
+            url = chunk.metadata.source_url
+            title = chunk.metadata.source_title or "Source"
+
+            if url not in url_to_citation:
+                url_to_citation[url] = {
                     "num": counter,
-                    "title": chunk.metadata.source_title or "Source",
-                    "url": chunk.metadata.source_url
+                    "title": title,
+                    "url": url
                 }
                 counter += 1
-        
+
+            citations[chunk.chunk_id] = url_to_citation[url]
+
+        for result in state.search_results:
+            for chunk in result.chunks:
+                _register(chunk)
+
+        for chunk in state.rag_chunks:
+            _register(chunk)
+
         return citations
     
     def _store_to_memory(self, state: AgentState, report: str):
@@ -167,10 +205,11 @@ This means the system cannot produce a reliable, grounded answer.
             summary_embedding = self.embedder.encode([summary]).tolist()[0]
             
             from qdrant_client.models import PointStruct
+            report_point_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, f"report_{state.run_id}"))
             qdrant_store.client.upsert(
                 collection_name=qdrant_store.collection_name,
                 points=[PointStruct(
-                    id=f"report_{state.run_id}",
+                    id=report_point_id,
                     vector=summary_embedding,
                     payload={
                         "text": summary,

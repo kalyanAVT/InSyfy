@@ -8,7 +8,7 @@ from api.schemas import ResearchRequest, ResearchResponse, ReportResponse
 from api.stream import event_stream
 from graph.state import AgentState, SearchResult
 from graph.pipeline import graph
-from db.redis_client import redis_client
+from db.redis_client import redis_client, emit_event
 
 
 router = APIRouter()
@@ -21,16 +21,6 @@ def _safe_get(obj, key, default=None):
     if isinstance(obj, dict):
         return obj.get(key, default)
     return getattr(obj, key, default)
-
-
-def emit_event(run_id: str, event_type: str, data: dict):
-    event = {
-        "type": event_type,
-        "run_id": run_id,
-        "timestamp": time.time(),
-        **data
-    }
-    redis_client.add_event(run_id, event)
 
 
 @router.post("/research", response_model=ResearchResponse)
@@ -61,19 +51,12 @@ async def start_research(request: ResearchRequest):
 
 async def _run_pipeline(run_id: str, state: AgentState):
     try:
-        emit_event(run_id, "node_start", {"node": "planner"})
-        
-        result_dict = graph.invoke(state)
+        result_dict = await asyncio.to_thread(graph.invoke, state)
         
         # Convert Pydantic objects to dict for safe access
         result_dict = _convert_to_dict(result_dict)
         
         timestamps = result_dict.get("timestamps", {})
-        for node_name, ts in timestamps.items():
-            emit_event(run_id, "node_complete", {
-                "node": node_name,
-                "latency_ms": _calc_latency(ts)
-            })
         
         if result_dict.get("declined"):
             redis_client.save_status(run_id, "declined")

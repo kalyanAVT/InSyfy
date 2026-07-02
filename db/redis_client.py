@@ -34,16 +34,16 @@ class RedisClient:
         return self.client.get(key)
     
     def add_event(self, run_id: str, event: dict):
-        """Append SSE event to list."""
+        """Append SSE event to list, in chronological order."""
         key = f"run:{run_id}:events"
-        self.client.lpush(key, json.dumps(event, default=str))
+        self.client.rpush(key, json.dumps(event, default=str))
         self.client.expire(key, self.ttl)
     
     def get_events(self, run_id: str, since: int = 0) -> List[dict]:
-        """Get SSE events from index."""
+        """Get SSE events from index `since` onward (chronological order)."""
         key = f"run:{run_id}:events"
         events = self.client.lrange(key, since, -1)
-        return [json.loads(e) for e in reversed(events)]  # lpush = newest first
+        return [json.loads(e) for e in events]
     
     def cache_search(self, query_hash: str, results: dict, ttl: int = 21600):
         """Cache search results (6 hours)."""
@@ -66,3 +66,21 @@ class RedisClient:
 
 # Singleton
 redis_client = RedisClient()
+
+
+def emit_event(run_id: str, event_type: str, data: Optional[dict] = None):
+    """Push a pipeline event onto the run's SSE log.
+
+    Shared by api/routes.py (pipeline-level events: run_started, done,
+    declined, error) and graph/nodes.py (per-node events: node_start,
+    node_complete, node_error) so both go through the same event log
+    without nodes.py needing to import from api/.
+    """
+    import time
+    event = {
+        "type": event_type,
+        "run_id": run_id,
+        "timestamp": time.time(),
+        **(data or {})
+    }
+    redis_client.add_event(run_id, event)
