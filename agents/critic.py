@@ -7,6 +7,7 @@ from langchain_openai import ChatOpenAI
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import PydanticOutputParser
 from graph.state import CritiqueResult, SynthesisResult, ResearchPlan
+from agents.token_utils import extract_token_count
 
 
 class CriticAgent:
@@ -30,6 +31,7 @@ class CriticAgent:
             )
         
         self.parser = PydanticOutputParser(pydantic_object=CritiqueResult)
+        self.last_token_usage = 0
     
     def run(self, synthesis: SynthesisResult, plan: ResearchPlan, retry_count: int) -> CritiqueResult:
         findings_text = "\n".join([
@@ -73,18 +75,22 @@ proceed: True if quality_score >= {threshold}, else False.
 
 Respond with ONLY the JSON. No extra text.""")
         
-        chain = prompt | self.llm | self.parser
+        self.last_token_usage = 0
         
         try:
-            result = chain.invoke({
-                "question": plan.sub_queries[0].query if plan.sub_queries else "Unknown",
-                "threshold": plan.quality_threshold,
-                "sub_queries": sub_queries_text,
-                "findings": findings_text,
-                "overall_confidence": synthesis.overall_confidence,
-                "source_diversity": synthesis.source_diversity_score,
-                "format_instructions": self.parser.get_format_instructions()
-            })
+            messages = prompt.format_messages(
+                question=plan.sub_queries[0].query if plan.sub_queries else "Unknown",
+                threshold=plan.quality_threshold,
+                sub_queries=sub_queries_text,
+                findings=findings_text,
+                overall_confidence=synthesis.overall_confidence,
+                source_diversity=synthesis.source_diversity_score,
+                format_instructions=self.parser.get_format_instructions()
+            )
+            ai_message = self.llm.invoke(messages)
+            self.last_token_usage = extract_token_count(ai_message)
+            
+            result = self.parser.parse(ai_message.content)
             return result
         except Exception as e:
             return CritiqueResult(

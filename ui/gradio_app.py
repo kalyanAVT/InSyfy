@@ -54,7 +54,8 @@ def get_report(run_id: str) -> tuple:
             "quality_score": data.get("quality_score"),
             "total_latency_ms": data.get("total_latency_ms"),
             "chunks_retrieved": data.get("chunks_retrieved", 0),
-            "sources": data.get("sources", [])
+            "sources": data.get("sources", []),
+            "token_usage": data.get("token_usage", {})
         }
 
         return markdown, structured
@@ -94,7 +95,9 @@ def stream_events(run_id: str):
                             yield f"▶️  {event['node']} started...\n"
                         elif event_type == "node_complete":
                             latency = event.get("latency_ms", 0)
-                            yield f"✅ {event['node']} complete ({latency}ms)\n"
+                            tokens = event.get("tokens")
+                            token_str = f", {tokens} tokens" if tokens else ""
+                            yield f"✅ {event['node']} complete ({latency}ms{token_str})\n"
                         elif event_type == "declined":
                             yield f"❌ DECLINED: {event.get('reason', '')}\n"
                         elif event_type == "done":
@@ -121,29 +124,82 @@ def stream_events(run_id: str):
         yield f"\n❌ Stream error: {str(e)}\n"
 
 
-def get_history() -> str:
-    """Fetch recent research history."""
+STATUS_EMOJI = {
+    "completed": "✅",
+    "failed": "❌",
+    "declined": "⚠️",
+    "running": "⏳"
+}
+
+
+def fetch_history_runs(limit: int = 10) -> list:
+    """Fetch recent research runs as raw dicts."""
     try:
-        resp = requests.get(f"{API_BASE}/history?limit=10", timeout=5)
+        resp = requests.get(f"{API_BASE}/history?limit={limit}", timeout=5)
         data = resp.json()
-        runs = data.get("runs", [])
+        return data.get("runs", [])
+    except Exception:
+        return []
 
-        lines = ["## Recent Research\n"]
-        for run in runs:
-            status_emoji = {
-                "completed": "✅",
-                "failed": "❌",
-                "declined": "⚠️",
-                "running": "⏳"
-            }.get(run.get("status", ""), "❓")
-            q = run.get("question", "")[:60]
-            score = run.get("quality_score")
-            score_str = f" (Q: {score:.2f})" if score else ""
-            lines.append(f"{status_emoji} {q}...{score_str}")
 
-        return "\n".join(lines) if len(lines) > 1 else "No history yet"
+def format_history_markdown(runs: list) -> str:
+    """Render history runs as a read-only markdown summary."""
+    if not runs:
+        return "No history yet"
+    lines = ["## Recent Research\n"]
+    for run in runs:
+        emoji = STATUS_EMOJI.get(run.get("status", ""), "❓")
+        q = run.get("question", "")[:60]
+        score = run.get("quality_score")
+        score_str = f" (Q: {score:.2f})" if score else ""
+        lines.append(f"{emoji} {q}...{score_str}")
+    return "\n".join(lines)
+
+
+def history_dropdown_choices(runs: list) -> list:
+    """Build (label, run_id) choices so a past report can be selected and opened."""
+    choices = []
+    for run in runs:
+        emoji = STATUS_EMOJI.get(run.get("status", ""), "❓")
+        q = run.get("question", "")[:70]
+        score = run.get("quality_score")
+        score_str = f" · Q:{score:.2f}" if score else ""
+        run_id = run.get("run_id", "")
+        choices.append((f"{emoji} {q}{score_str}  ({run_id})", run_id))
+    return choices
+
+
+def fetch_metrics_markdown() -> str:
+    """Fetch aggregate metrics and render as markdown. Real numbers only —
+    shows 'no runs yet' rather than fabricating anything when empty."""
+    try:
+        resp = requests.get(f"{API_BASE}/metrics", timeout=5)
+        data = resp.json()
     except Exception as e:
-        return f"Error loading history: {str(e)}"
+        return f"Error loading metrics: {str(e)}"
+
+    if data.get("total_runs", 0) == 0:
+        return "### No runs logged yet\n\nRun a research query to start collecting real metrics."
+
+    lines = [
+        f"### Based on the last {data['window_size']} run(s)",
+        "",
+        f"- **Success rate:** {data['success_rate'] * 100:.1f}%  "
+        f"({data['completed']} completed, {data['declined']} declined, {data['failed']} failed)",
+        f"- **Avg latency:** {data['avg_latency_ms']:,} ms  "
+        f"(p50: {data['p50_latency_ms']:,} ms, p95: {data['p95_latency_ms']:,} ms)",
+        f"- **Avg quality score:** {data['avg_quality_score'] if data['avg_quality_score'] is not None else 'N/A'}",
+        f"- **Avg retries per run:** {data['avg_retries_per_run']}",
+        f"- **Total tokens used:** {data['total_tokens']:,}  "
+        f"(avg {data['avg_tokens_per_run']:,} per run)",
+    ]
+    if data.get("cost_estimate_configured"):
+        lines.append(f"- **Total estimated cost:** ${data['total_estimated_cost_usd']:.4f}")
+    else:
+        lines.append(
+            "- **Cost estimate:** not configured — set `COST_PER_1K_TOKENS` in `.env` to enable"
+        )
+    return "\n".join(lines)
 
 
 REPORT_CSS = """
@@ -229,6 +285,48 @@ REPORT_CSS = """
     border-radius: 8px !important;
     padding: 16px 20px !important;
 }
+
+/* Custom theme toggle button (client-side only, no page reload) */
+#insyfy-theme-toggle {
+    font-size: 20px !important;
+    border-radius: 50% !important;
+    width: 44px !important;
+    height: 44px !important;
+    min-width: 44px !important;
+    padding: 0 !important;
+}
+
+/* Best-effort: hide Gradio's built-in dark/light toggle. That one works by
+   navigating to ?__theme=dark/light, which forces a full page reload and
+   is what was wiping out all run state on theme switch. If it's still
+   visible after this, right-click it -> Inspect and send me the actual
+   selector so this can be tightened. */
+button[aria-label*="theme" i],
+button[title*="theme" i],
+.theme-toggle,
+.dark-toggle-button {
+    display: none !important;
+}
+
+/* ---- Dark theme (toggled via body.insyfy-dark, not Gradio's system) ---- */
+body.insyfy-dark {
+    --insyfy-ink: #e7f1ef;
+    --insyfy-ink-soft: #9fb8b4;
+    --insyfy-teal: #4fa39e;
+    --insyfy-teal-deep: #7cc9c3;
+    --insyfy-line: #2c3f3d;
+    --insyfy-paper: #142523;
+}
+body.insyfy-dark,
+body.insyfy-dark .gradio-container {
+    background: #0b1615 !important;
+}
+body.insyfy-dark .report-markdown code {
+    background: #0f1e1c !important;
+}
+body.insyfy-dark .trace-panel textarea {
+    background: #06100f !important;
+}
 """
 
 
@@ -236,18 +334,22 @@ def create_ui():
     """Create and return the Gradio Blocks UI."""
 
     with gr.Blocks(title="InSyfy — Autonomous Research Agent", css=REPORT_CSS) as demo:
-        gr.Markdown("""
-        # 🔬 InSyfy
-        ### Autonomous Research & Competitive Intelligence Agent
+        with gr.Row():
+            with gr.Column(scale=10):
+                gr.Markdown("""
+                # 🔬 InSyfy
+                ### Autonomous Research & Competitive Intelligence Agent
 
-        Enter a research question below. InSyfy will:
-        1. Plan sub-queries
-        2. Search the web in parallel
-        3. Retrieve from memory
-        4. Synthesize findings with citations
-        5. Self-critique and retry if needed
-        6. Deliver a structured report
-        """)
+                Enter a research question below. InSyfy will:
+                1. Plan sub-queries
+                2. Search the web in parallel
+                3. Retrieve from memory
+                4. Synthesize findings with citations
+                5. Self-critique and retry if needed
+                6. Deliver a structured report
+                """)
+            with gr.Column(scale=1, min_width=60):
+                theme_toggle_btn = gr.Button("🌓", elem_id="insyfy-theme-toggle")
 
         with gr.Row():
             with gr.Column(scale=2):
@@ -294,7 +396,20 @@ def create_ui():
                 # History panel
                 gr.Markdown("### 📚 History")
                 history_output = gr.Markdown(elem_classes=["history-panel"])
-                refresh_history_btn = gr.Button("Refresh History")
+                with gr.Row():
+                    refresh_history_btn = gr.Button("Refresh")
+                history_selector = gr.Dropdown(
+                    choices=[],
+                    label="Open a past report",
+                    interactive=True
+                )
+                open_history_btn = gr.Button("📂 Open Selected Report")
+
+                # Metrics panel — real, computed aggregate stats
+                gr.Markdown("---")
+                gr.Markdown("### 📈 Metrics")
+                metrics_output = gr.Markdown(elem_classes=["history-panel"])
+                refresh_metrics_btn = gr.Button("Refresh Metrics")
 
         # State
         run_id_state = gr.State("")
@@ -322,7 +437,15 @@ def create_ui():
             return report_md, structured_json
 
         def on_refresh():
-            return get_history()
+            runs = fetch_history_runs()
+            return format_history_markdown(runs), gr.Dropdown(choices=history_dropdown_choices(runs))
+
+        def on_open_history(selected_run_id):
+            if not selected_run_id:
+                return gr.update(), gr.update(), gr.update(), "⚠️ Select a report from the dropdown first.\n"
+            report_md, structured_json = get_report(selected_run_id)
+            trace_msg = f"📂 Loaded from history — run {selected_run_id}\n"
+            return report_md, structured_json, selected_run_id, trace_msg
 
         # Wire up: submit → get run_id → start streaming → get report
         submit_btn.click(
@@ -337,15 +460,68 @@ def create_ui():
             fn=on_complete,
             inputs=[run_id_state],
             outputs=[report_output, json_output]
+        ).then(
+            fn=on_refresh,
+            outputs=[history_output, history_selector]
+        ).then(
+            fn=fetch_metrics_markdown,
+            outputs=[metrics_output]
         )
 
         refresh_history_btn.click(
             fn=on_refresh,
-            outputs=[history_output]
+            outputs=[history_output, history_selector]
         )
 
-        # Load history on startup
-        demo.load(fn=get_history, outputs=[history_output])
+        refresh_metrics_btn.click(
+            fn=fetch_metrics_markdown,
+            outputs=[metrics_output]
+        )
+
+        open_history_btn.click(
+            fn=on_open_history,
+            inputs=[history_selector],
+            outputs=[report_output, json_output, run_id_state, trace_output]
+        )
+
+        # Theme toggle: pure client-side class toggle, no Python round-trip,
+        # no page navigation — this is what actually fixes the reload bug.
+        theme_toggle_btn.click(
+            fn=None,
+            inputs=None,
+            outputs=None,
+            js="""
+            () => {
+                document.body.classList.toggle('insyfy-dark');
+                try {
+                    localStorage.setItem(
+                        'insyfy-theme',
+                        document.body.classList.contains('insyfy-dark') ? 'dark' : 'light'
+                    );
+                } catch (e) {}
+            }
+            """
+        )
+
+        # Restore saved theme preference on page load, still client-side only
+        demo.load(
+            fn=None,
+            inputs=None,
+            outputs=None,
+            js="""
+            () => {
+                try {
+                    if (localStorage.getItem('insyfy-theme') === 'dark') {
+                        document.body.classList.add('insyfy-dark');
+                    }
+                } catch (e) {}
+            }
+            """
+        )
+
+        # Load history and metrics on startup
+        demo.load(fn=on_refresh, outputs=[history_output, history_selector])
+        demo.load(fn=fetch_metrics_markdown, outputs=[metrics_output])
 
     return demo
 

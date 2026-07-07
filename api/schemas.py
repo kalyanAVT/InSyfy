@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field
-from typing import Optional, Literal
+from typing import Optional, Literal, Dict
 
 
 class ResearchRequest(BaseModel):
@@ -22,3 +22,4 @@ class ReportResponse(BaseModel):
     total_latency_ms: Optional[int] = None
     chunks_retrieved: int = 0
     sources: list = []
+    token_usage: Dict[str, int] = {}

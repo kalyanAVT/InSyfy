@@ -16,6 +16,19 @@ def merge_dicts(existing: Dict, new: Dict) -> Dict:
     return merged
 
 
+def merge_token_usage(existing: Dict[str, int], new: Dict[str, int]) -> Dict[str, int]:
+    """Reducer: sum token counts per node instead of overwriting.
+
+    Unlike timestamps, a node's token cost from a retry should ADD to its
+    running total, not replace the previous attempt's count — both calls
+    actually cost tokens.
+    """
+    merged = dict(existing)
+    for key, value in new.items():
+        merged[key] = merged.get(key, 0) + value
+    return merged
+
+
 class SubQuery(BaseModel):
     query: str = Field(description="The search query text")
     intent: str = Field(description="What this query is trying to find")
@@ -56,12 +69,21 @@ class SearchResult(BaseModel):
 
 class Finding(BaseModel):
     claim: str
+    sub_query: str = Field(
+        default="",
+        description="The exact text of the sub-query this finding primarily answers, if identifiable"
+    )
     supporting_chunks: List[str] = Field(default_factory=list)
     confidence: float = 0.0
     contradictions: List[str] = Field(default_factory=list)
 
 
 class SynthesisResult(BaseModel):
+    executive_summary: str = Field(
+        default="",
+        description="A coherent 3-5 sentence prose summary of the overall answer, "
+                     "not a concatenation of individual claims"
+    )
     key_findings: List[Finding] = Field(default_factory=list)
     overall_confidence: float = 0.0
     source_diversity_score: float = 0.0
@@ -101,7 +123,7 @@ class AgentState(BaseModel):
     retry_count: int = 0
     quality_warning: bool = False
     timestamps: Annotated[Dict[str, Dict[str, str]], merge_dicts] = Field(default_factory=dict)
-    token_usage: Dict[str, int] = Field(default_factory=dict)
+    token_usage: Annotated[Dict[str, int], merge_token_usage] = Field(default_factory=dict)
     errors: Annotated[List[AgentError], merge_lists] = Field(default_factory=list)
     
     class Config:

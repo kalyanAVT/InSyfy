@@ -9,6 +9,7 @@ from api.stream import event_stream
 from graph.state import AgentState, SearchResult
 from graph.pipeline import graph
 from db.redis_client import redis_client, emit_event
+from agents.token_utils import estimate_cost
 
 
 router = APIRouter()
@@ -50,6 +51,7 @@ async def start_research(request: ResearchRequest):
 
 
 async def _run_pipeline(run_id: str, state: AgentState):
+    pipeline_start = time.time()
     try:
         result_dict = await asyncio.to_thread(graph.invoke, state)
         
@@ -57,22 +59,40 @@ async def _run_pipeline(run_id: str, state: AgentState):
         result_dict = _convert_to_dict(result_dict)
         
         timestamps = result_dict.get("timestamps", {})
+        token_usage = result_dict.get("token_usage", {})
+        total_latency = _calc_total_latency(timestamps)
         
         if result_dict.get("declined"):
+            status = "declined"
+            quality_score = None
             redis_client.save_status(run_id, "declined")
             emit_event(run_id, "declined", {
                 "reason": result_dict.get("decline_reason", "")
             })
         else:
-            redis_client.save_status(run_id, "completed")
+            status = "completed"
             critique = result_dict.get("critique", {})
             quality_score = critique.get("quality_score") if isinstance(critique, dict) else None
+            redis_client.save_status(run_id, "completed")
             emit_event(run_id, "done", {
                 "quality_score": quality_score,
-                "total_latency_ms": _calc_total_latency(timestamps)
+                "total_latency_ms": total_latency
             })
         
         redis_client.save_state(run_id, result_dict)
+        
+        redis_client.log_run_metrics({
+            "run_id": run_id,
+            "question": state.research_question,
+            "status": status,
+            "quality_score": quality_score,
+            "total_latency_ms": total_latency or int((time.time() - pipeline_start) * 1000),
+            "total_tokens": sum(token_usage.values()) if token_usage else 0,
+            "estimated_cost_usd": estimate_cost(token_usage),
+            "node_latencies_ms": {node: _calc_latency(ts) for node, ts in timestamps.items()},
+            "retry_count": result_dict.get("retry_count", 0),
+            "timestamp": time.time()
+        })
         
     except Exception as e:
         error_msg = f"Pipeline error: {str(e)}\n{traceback.format_exc()}"
@@ -82,6 +102,19 @@ async def _run_pipeline(run_id: str, state: AgentState):
             "error_type": "PIPELINE_FAILURE",
             "message": str(e),
             "traceback": traceback.format_exc()[-500:]
+        })
+        
+        redis_client.log_run_metrics({
+            "run_id": run_id,
+            "question": state.research_question,
+            "status": "failed",
+            "quality_score": None,
+            "total_latency_ms": int((time.time() - pipeline_start) * 1000),
+            "total_tokens": 0,
+            "estimated_cost_usd": 0.0,
+            "node_latencies_ms": {},
+            "retry_count": 0,
+            "timestamp": time.time()
         })
 
 
@@ -156,18 +189,27 @@ async def get_report(run_id: str):
     
     chunks_count += len(result.get("rag_chunks", []))
     
-    sources = []
-    seen = set()
-    if isinstance(search_results, list):
-        for sr in search_results:
-            if isinstance(sr, dict) and "chunks" in sr:
-                for chunk in sr.get("chunks", []):
-                    meta = chunk.get("metadata", {}) if isinstance(chunk, dict) else {}
-                    url = meta.get("source_url", "") if isinstance(meta, dict) else ""
-                    if url and url not in seen:
-                        seen.add(url)
-                        title = meta.get("source_title", "Source") if isinstance(meta, dict) else "Source"
-                        sources.append({"url": url, "title": title})
+    # Single source of truth: writer.py builds the citation map once and
+    # saves it to state.citations. Re-deriving sources here separately
+    # used to forget rag_chunks and drift out of sync with the report's
+    # own Sources section — read the same list the report itself used.
+    citations = result.get("citations", [])
+    if citations:
+        sources = [{"url": c.get("url", ""), "title": c.get("title", "Source")} for c in citations]
+    else:
+        # Fallback for runs cached before this field existed
+        sources = []
+        seen = set()
+        if isinstance(search_results, list):
+            for sr in search_results:
+                if isinstance(sr, dict) and "chunks" in sr:
+                    for chunk in sr.get("chunks", []):
+                        meta = chunk.get("metadata", {}) if isinstance(chunk, dict) else {}
+                        url = meta.get("source_url", "") if isinstance(meta, dict) else ""
+                        if url and url not in seen:
+                            seen.add(url)
+                            title = meta.get("source_title", "Source") if isinstance(meta, dict) else "Source"
+                            sources.append({"url": url, "title": title})
     
     critique = result.get("critique", {})
     quality_score = critique.get("quality_score") if isinstance(critique, dict) else None
@@ -190,7 +232,8 @@ async def get_report(run_id: str):
         quality_score=quality_score,
         total_latency_ms=total_latency,
         chunks_retrieved=chunks_count,
-        sources=sources
+        sources=sources,
+        token_usage=result.get("token_usage", {})
     )
 
 
@@ -237,4 +280,60 @@ async def health_check():
         "redis": "connected" if redis_ok else "disconnected",
         "qdrant": "connected" if qdrant_ok else "disconnected",
         "version": "0.3.0-step3"
+    }
+
+
+def _percentile(values: list, p: float):
+    """p is a fraction, e.g. 0.5 for p50, 0.95 for p95."""
+    if not values:
+        return None
+    s = sorted(values)
+    idx = min(len(s) - 1, int(len(s) * p))
+    return s[idx]
+
+
+def _avg(values: list):
+    return round(sum(values) / len(values), 2) if values else None
+
+
+@router.get("/metrics")
+async def get_metrics(limit: int = 500):
+    """
+    Aggregate stats computed from actual logged runs. Returns
+    total_runs=0 if nothing has run yet — no fabricated numbers.
+    """
+    runs = redis_client.get_recent_metrics(limit=limit)
+    
+    if not runs:
+        return {"total_runs": 0, "message": "No runs logged yet"}
+    
+    total = len(runs)
+    completed = sum(1 for r in runs if r.get("status") == "completed")
+    declined = sum(1 for r in runs if r.get("status") == "declined")
+    failed = sum(1 for r in runs if r.get("status") == "failed")
+    
+    latencies = [r["total_latency_ms"] for r in runs if r.get("total_latency_ms")]
+    quality_scores = [r["quality_score"] for r in runs if r.get("quality_score") is not None]
+    retry_counts = [r.get("retry_count", 0) for r in runs]
+    total_tokens = sum(r.get("total_tokens", 0) for r in runs)
+    total_cost = sum(r.get("estimated_cost_usd", 0.0) for r in runs)
+    
+    return {
+        "window_size": total,
+        "total_runs": total,
+        "completed": completed,
+        "declined": declined,
+        "failed": failed,
+        "success_rate": round(completed / total, 3),
+        "avg_latency_ms": _avg(latencies),
+        "p50_latency_ms": _percentile(latencies, 0.5),
+        "p95_latency_ms": _percentile(latencies, 0.95),
+        "avg_quality_score": _avg(quality_scores),
+        "avg_retries_per_run": _avg(retry_counts),
+        "total_tokens": total_tokens,
+        "avg_tokens_per_run": round(total_tokens / total, 1) if total else 0,
+        "total_estimated_cost_usd": round(total_cost, 4),
+        "cost_estimate_configured": total_cost > 0 or any(
+            r.get("estimated_cost_usd", 0) > 0 for r in runs
+        )
     }

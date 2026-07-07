@@ -31,6 +31,7 @@ def planner_node(state: AgentState) -> dict[str, Any]:
 
         result.update({
             "plan": plan,
+            "token_usage": {"planner": agent.last_token_usage},
             "timestamps": {
                 **state.timestamps,
                 "planner": {
@@ -41,7 +42,8 @@ def planner_node(state: AgentState) -> dict[str, Any]:
         })
         emit_event(state.run_id, "node_complete", {
             "node": "planner",
-            "latency_ms": int((time.time() - start_time) * 1000)
+            "latency_ms": int((time.time() - start_time) * 1000),
+            "tokens": agent.last_token_usage
         })
         return result
 
@@ -165,16 +167,19 @@ def synthesizer_node(state: AgentState) -> dict[str, Any]:
         agent = SynthesizerAgent()
         synthesis = agent.run(
             research_question=state.research_question,
-            chunks=all_chunks
+            chunks=all_chunks,
+            sub_queries=[sq.query for sq in state.plan.sub_queries] if state.plan else []
         )
 
         emit_event(state.run_id, "node_complete", {
             "node": "synthesizer",
             "findings_count": len(synthesis.key_findings) if synthesis else 0,
-            "latency_ms": int((time.time() - start_time) * 1000)
+            "latency_ms": int((time.time() - start_time) * 1000),
+            "tokens": agent.last_token_usage
         })
         return {
             "synthesis": synthesis,
+            "token_usage": {"synthesizer": agent.last_token_usage},
             "timestamps": {
                 **state.timestamps,
                 "synthesizer": {
@@ -265,6 +270,7 @@ def critic_node(state: AgentState) -> dict[str, Any]:
         # Increment retry count if not proceeding and under limit
         result = {
             "critique": critique,
+            "token_usage": {"critic": agent.last_token_usage},
             "timestamps": {
                 **state.timestamps,
                 "critic": {
@@ -285,7 +291,8 @@ def critic_node(state: AgentState) -> dict[str, Any]:
             "node": "critic",
             "quality_score": critique.quality_score,
             "proceed": critique.proceed,
-            "latency_ms": int((time.time() - start_time) * 1000)
+            "latency_ms": int((time.time() - start_time) * 1000),
+            "tokens": agent.last_token_usage
         })
         return result
 
@@ -322,6 +329,7 @@ def writer_node(state: AgentState) -> dict[str, Any]:
         })
         return {
             "final_report": report,
+            "citations": agent.last_citations,
             "timestamps": {
                 **state.timestamps,
                 "writer": {

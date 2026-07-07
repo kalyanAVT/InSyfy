@@ -56,6 +56,24 @@ class RedisClient:
         data = self.client.get(key)
         return json.loads(data) if data else None
     
+    def log_run_metrics(self, metrics: dict):
+        """Append a run's metrics summary to a persistent, non-expiring log.
+
+        Deliberately separate from run:{id}:state, which has a 24h TTL —
+        metrics need to survive long after the run itself has expired, so
+        real usage data can accumulate over days/weeks instead of vanishing.
+        Capped at the most recent 5000 entries so it doesn't grow forever.
+        """
+        key = "metrics:runs"
+        self.client.rpush(key, json.dumps(metrics, default=str))
+        self.client.ltrim(key, -5000, -1)
+
+    def get_recent_metrics(self, limit: int = 100) -> List[dict]:
+        """Get the most recent `limit` run metrics summaries, oldest first."""
+        key = "metrics:runs"
+        raw = self.client.lrange(key, -limit, -1)
+        return [json.loads(r) for r in raw]
+
     def health_check(self) -> bool:
         """Check Redis connection."""
         try:

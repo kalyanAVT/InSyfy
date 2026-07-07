@@ -8,6 +8,7 @@ from langchain_openai import ChatOpenAI
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import PydanticOutputParser
 from graph.state import ResearchPlan, SubQuery
+from agents.token_utils import extract_token_count
 
 
 class PlannerAgent:
@@ -31,6 +32,7 @@ class PlannerAgent:
             )
         
         self.parser = PydanticOutputParser(pydantic_object=ResearchPlan)
+        self.last_token_usage = 0
     
     def run(self, question: str, gap_analysis: str = "") -> ResearchPlan:
         prompt_text = """You are a research planning agent. Your job is to break a research question into 3-5 focused sub-queries.
@@ -58,14 +60,18 @@ Generate DIFFERENT, more targeted sub-queries that address these gaps specifical
         prompt_text += "\nRespond with ONLY the JSON matching the format above. No extra text."
         
         prompt = ChatPromptTemplate.from_template(prompt_text)
-        chain = prompt | self.llm | self.parser
+        self.last_token_usage = 0
         
         for attempt in range(3):
             try:
-                result = chain.invoke({
-                    "question": question,
-                    "format_instructions": self.parser.get_format_instructions()
-                })
+                messages = prompt.format_messages(
+                    question=question,
+                    format_instructions=self.parser.get_format_instructions()
+                )
+                ai_message = self.llm.invoke(messages)
+                self.last_token_usage += extract_token_count(ai_message)
+                
+                result = self.parser.parse(ai_message.content)
                 if not result.sub_queries:
                     result.sub_queries = [SubQuery(query=question, intent="Direct search")]
                 if gap_analysis:
