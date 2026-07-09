@@ -63,16 +63,29 @@ def get_report(run_id: str) -> tuple:
         return f"Error fetching report: {str(e)}", {}
 
 
+def to_json_code(structured: dict) -> str:
+    """Render a dict as pretty-printed JSON text for gr.Code(language='json')."""
+    return json.dumps(structured, indent=2, ensure_ascii=False)
+
+
 def stream_events(run_id: str):
     """
-    Generator for SSE events.
-    Yields updates for Gradio's live trace panel.
+    Generator for SSE events, yielding a growing list of chat messages
+    (for gr.Chatbot(type="messages")) — each yield includes the FULL
+    accumulated history, not just the newest line, so nothing gets
+    overwritten as new events arrive.
     """
+    messages = []
+
+    def _add(content: str):
+        messages.append({"role": "assistant", "content": content})
+        return list(messages)
+
     if run_id.startswith("error"):
-        yield f"❌ Error starting research: {run_id}"
+        yield _add(f"Error starting research: {run_id}")
         return
 
-    yield f"🔬 Run ID: {run_id}\n⏳ Connecting to event stream...\n"
+    yield _add(f"Run `{run_id}` — connecting to the event stream...")
 
     try:
         resp = requests.get(
@@ -90,38 +103,38 @@ def stream_events(run_id: str):
                         event_type = event.get("type", "unknown")
 
                         if event_type == "run_started":
-                            yield f"🚀 Research started: {event.get('question', '')[:80]}...\n"
+                            yield _add(f"**Research started:** {event.get('question', '')[:120]}")
                         elif event_type == "node_start":
-                            yield f"▶️  {event['node']} started...\n"
+                            yield _add(f"▶️ `{event['node']}` started...")
                         elif event_type == "node_complete":
                             latency = event.get("latency_ms", 0)
                             tokens = event.get("tokens")
-                            token_str = f", {tokens} tokens" if tokens else ""
-                            yield f"✅ {event['node']} complete ({latency}ms{token_str})\n"
+                            token_str = f" · {tokens} tokens" if tokens else ""
+                            yield _add(f"✅ `{event['node']}` complete — {latency}ms{token_str}")
+                        elif event_type == "node_error":
+                            yield _add(f"⚠️ `{event.get('node', 'unknown')}` errored: {event.get('message', '')}")
                         elif event_type == "declined":
-                            yield f"❌ DECLINED: {event.get('reason', '')}\n"
+                            yield _add(f"❌ **Declined:** {event.get('reason', '')}")
                         elif event_type == "done":
                             quality = event.get("quality_score")
                             latency = event.get("total_latency_ms")
-                            yield f"\n🎉 Pipeline complete!"
+                            summary = "🎉 **Pipeline complete!**"
                             if quality:
-                                yield f" Quality: {quality:.2f}"
+                                summary += f" Quality: {quality:.2f}"
                             if latency:
-                                yield f" | Total: {latency}ms"
-                            yield "\n"
+                                summary += f" · Total: {latency}ms"
+                            yield _add(summary)
                             break
                         elif event_type == "error":
-                            yield f"\n❌ ERROR: {event.get('error_type', 'Unknown')}\n"
-                            yield f"Message: {event.get('message', '')}\n"
-                            if event.get('traceback'):
-                                yield f"Details: {event.get('traceback')[:200]}...\n"
+                            msg = f"❌ **Error:** {event.get('error_type', 'Unknown')} — {event.get('message', '')}"
+                            yield _add(msg)
                             break
 
                     except json.JSONDecodeError:
                         continue
 
     except Exception as e:
-        yield f"\n❌ Stream error: {str(e)}\n"
+        yield _add(f"❌ Stream error: {str(e)}")
 
 
 STATUS_EMOJI = {
@@ -269,13 +282,36 @@ REPORT_CSS = """
     margin: 22px 0 !important;
 }
 
-/* Live trace panel — monospace terminal feel */
-.trace-panel textarea {
-    font-family: 'IBM Plex Mono', 'Courier New', monospace !important;
-    font-size: 13px !important;
+/* Live agent trace — chat bubble styling */
+.trace-panel {
     background: #0f1e1c !important;
-    color: #a9e0d8 !important;
     border-radius: 8px !important;
+    border: 1px solid var(--insyfy-line) !important;
+}
+.trace-panel .message {
+    background: #16302c !important;
+    color: #d7ece8 !important;
+    border: 1px solid #234641 !important;
+    font-family: 'IBM Plex Mono', 'Courier New', monospace !important;
+    font-size: 12.5px !important;
+}
+.trace-panel .message code {
+    background: #0b1817 !important;
+    color: #7cc9c3 !important;
+}
+
+/* Structured output code pane */
+.structured-code {
+    border-radius: 8px !important;
+    border: 1px solid var(--insyfy-line) !important;
+}
+
+/* Canvas layout panes */
+.canvas-pane {
+    background: var(--insyfy-paper) !important;
+    border: 1px solid var(--insyfy-line) !important;
+    border-radius: 10px !important;
+    padding: 18px 20px !important;
 }
 
 /* History panel cards */
@@ -324,8 +360,11 @@ body.insyfy-dark .gradio-container {
 body.insyfy-dark .report-markdown code {
     background: #0f1e1c !important;
 }
-body.insyfy-dark .trace-panel textarea {
-    background: #06100f !important;
+body.insyfy-dark .trace-panel .message {
+    background: #0b1817 !important;
+}
+body.insyfy-dark .canvas-pane {
+    background: #142523 !important;
 }
 """
 
@@ -333,7 +372,7 @@ body.insyfy-dark .trace-panel textarea {
 def create_ui():
     """Create and return the Gradio Blocks UI."""
 
-    with gr.Blocks(title="InSyfy — Autonomous Research Agent", css=REPORT_CSS) as demo:
+    with gr.Blocks(title="InSyfy — Autonomous Research Agent") as demo:
         with gr.Row():
             with gr.Column(scale=10):
                 gr.Markdown("""
@@ -352,7 +391,7 @@ def create_ui():
                 theme_toggle_btn = gr.Button("🌓", elem_id="insyfy-theme-toggle")
 
         with gr.Row():
-            with gr.Column(scale=2):
+            with gr.Column(scale=3):
                 # Input panel
                 question_input = gr.Textbox(
                     label="Research Question",
@@ -366,50 +405,61 @@ def create_ui():
                         value="standard",
                         label="Research Depth"
                     )
-                    submit_btn = gr.Button("Start Research", variant="primary")
+                submit_btn = gr.Button("Start Research", variant="primary")
 
-                # Live trace panel
-                gr.Markdown("---")
-                gr.Markdown("### 📡 Live Agent Trace")
-                trace_output = gr.Textbox(
+                # Live trace panel — narrates each agent step as it happens
+                gr.Markdown("### Agent Trace")
+                trace_output = gr.Chatbot(
                     label="",
-                    lines=12,
-                    interactive=False,
-                    autoscroll=True,
-                    elem_classes=["trace-panel"]
+                    height=380,
+                    elem_classes=["trace-panel"],
+                    show_label=False
                 )
-
-                # Report output - Markdown
-                gr.Markdown("---")
-                gr.Markdown("### 📄 Final Report")
-                report_output = gr.Markdown(elem_classes=["report-markdown"])
-
-                # Structured JSON output
-                gr.Markdown("---")
-                gr.Markdown("### 📊 Structured Output (JSON)")
-                json_output = gr.JSON(
-                    label="Report Metadata & Sources",
-                    value={}
-                )
-
-            with gr.Column(scale=1):
-                # History panel
-                gr.Markdown("### 📚 History")
-                history_output = gr.Markdown(elem_classes=["history-panel"])
-                with gr.Row():
-                    refresh_history_btn = gr.Button("Refresh")
-                history_selector = gr.Dropdown(
-                    choices=[],
-                    label="Open a past report",
-                    interactive=True
-                )
-                open_history_btn = gr.Button("📂 Open Selected Report")
 
                 # Metrics panel — real, computed aggregate stats
                 gr.Markdown("---")
-                gr.Markdown("### 📈 Metrics")
+                gr.Markdown("### Metrics")
                 metrics_output = gr.Markdown(elem_classes=["history-panel"])
                 refresh_metrics_btn = gr.Button("Refresh Metrics")
+
+            with gr.Column(scale=5):
+                # Open a past report — sits directly above the canvas it
+                # controls, instead of being a disconnected sidebar control.
+                with gr.Row():
+                    history_selector = gr.Dropdown(
+                        choices=[],
+                        label="Open a past report",
+                        interactive=True,
+                        scale=4
+                    )
+                    open_history_btn = gr.Button("Open Selected Report", scale=1)
+
+                # The canvas: the report document itself, growing/updating
+                # in place. max_height turns it into its own scrollable
+                # window instead of growing the whole page.
+                gr.Markdown("### Report")
+                report_output = gr.Markdown(
+                    elem_classes=["report-markdown", "canvas-pane"],
+                    max_height=650
+                )
+
+                # Collapsible — this was the long, always-open JSON blob
+                with gr.Accordion("Structured Output", open=False):
+                    json_output = gr.Code(
+                        language="json",
+                        label="",
+                        show_label=False,
+                        elem_classes=["structured-code"],
+                        max_lines=25
+                    )
+
+            with gr.Column(scale=2):
+                # History panel — browsing only; opening a report happens
+                # via the dropdown above the canvas now.
+                gr.Markdown("### History")
+                history_output = gr.Markdown(elem_classes=["history-panel"])
+                refresh_history_btn = gr.Button("Refresh")
+
 
         # State
         run_id_state = gr.State("")
@@ -418,8 +468,13 @@ def create_ui():
         def on_submit(question, depth):
             run_id = submit_research(question, depth)
             if run_id.startswith("error"):
-                return run_id, f"❌ Failed to start: {run_id}\n", "", {}
-            return run_id, f"🔬 Started run: {run_id}\n⏳ Waiting for events...\n", "", {}
+                return run_id, [{"role": "assistant", "content": f"Failed to start: {run_id}"}], "", ""
+            return (
+                run_id,
+                [{"role": "assistant", "content": f"Started run `{run_id}` — waiting for events..."}],
+                "",
+                ""
+            )
 
         def on_stream(run_id):
             for update in stream_events(run_id):
@@ -434,7 +489,7 @@ def create_ui():
                 time.sleep(1)
 
             report_md, structured_json = get_report(run_id)
-            return report_md, structured_json
+            return report_md, to_json_code(structured_json)
 
         def on_refresh():
             runs = fetch_history_runs()
@@ -442,10 +497,11 @@ def create_ui():
 
         def on_open_history(selected_run_id):
             if not selected_run_id:
-                return gr.update(), gr.update(), gr.update(), "⚠️ Select a report from the dropdown first.\n"
+                empty_msg = [{"role": "assistant", "content": "Select a report from the dropdown first."}]
+                return gr.update(), gr.update(), gr.update(), empty_msg
             report_md, structured_json = get_report(selected_run_id)
-            trace_msg = f"📂 Loaded from history — run {selected_run_id}\n"
-            return report_md, structured_json, selected_run_id, trace_msg
+            trace_msg = [{"role": "assistant", "content": f"Loaded from history — run `{selected_run_id}`"}]
+            return report_md, to_json_code(structured_json), selected_run_id, trace_msg
 
         # Wire up: submit → get run_id → start streaming → get report
         submit_btn.click(
@@ -528,4 +584,4 @@ def create_ui():
 
 if __name__ == "__main__":
     demo = create_ui()
-    demo.launch()
+    demo.launch(css=REPORT_CSS)

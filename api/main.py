@@ -40,9 +40,9 @@ app = create_app()
 
 # Mount Gradio UI
 try:
-    from ui.gradio_app import create_ui
+    from ui.gradio_app import create_ui, REPORT_CSS
     gradio_app = create_ui()
-    app = gr.mount_gradio_app(app, gradio_app, path="/")
+    app = gr.mount_gradio_app(app, gradio_app, path="/", css=REPORT_CSS)
 except ImportError as e:
     print(f"Gradio UI not mounted: {e}")
 
