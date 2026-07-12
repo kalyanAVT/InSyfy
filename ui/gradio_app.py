@@ -68,6 +68,43 @@ def to_json_code(structured: dict) -> str:
     return json.dumps(structured, indent=2, ensure_ascii=False)
 
 
+def download_pdf(run_id: str):
+    """Fetch the PDF from the API and save it to a temp file for gr.DownloadButton."""
+    if not run_id or run_id.startswith("error"):
+        return None
+    try:
+        resp = requests.get(f"{API_BASE}/report/{run_id}/pdf", timeout=30)
+        if resp.status_code != 200:
+            return None
+        import tempfile
+        path = f"{tempfile.gettempdir()}/insyfy_report_{run_id}.pdf"
+        with open(path, "wb") as f:
+            f.write(resp.content)
+        return path
+    except Exception:
+        return None
+
+
+def send_report_email_ui(run_id: str, to_email: str) -> str:
+    """Trigger the email-send endpoint. Returns a status message for the UI."""
+    if not run_id or run_id.startswith("error"):
+        return "Start or open a report first."
+    if not to_email or "@" not in to_email:
+        return "Enter a valid email address."
+    try:
+        resp = requests.post(
+            f"{API_BASE}/report/{run_id}/email",
+            json={"to_email": to_email},
+            timeout=30
+        )
+        data = resp.json()
+        if resp.status_code == 200:
+            return data.get("message", "Sent.")
+        return data.get("detail", "Failed to send email.")
+    except Exception as e:
+        return f"Error: {str(e)}"
+
+
 def stream_events(run_id: str):
     """
     Generator for SSE events, yielding a growing list of chat messages
@@ -443,6 +480,16 @@ def create_ui():
                     max_height=650
                 )
 
+                with gr.Row():
+                    download_pdf_btn = gr.DownloadButton("Download PDF")
+                    email_input = gr.Textbox(
+                        placeholder="you@example.com",
+                        label="Email report to",
+                        scale=2
+                    )
+                    send_email_btn = gr.Button("Send", scale=1)
+                email_status = gr.Markdown("")
+
                 # Collapsible — this was the long, always-open JSON blob
                 with gr.Accordion("Structured Output", open=False):
                     json_output = gr.Code(
@@ -538,6 +585,18 @@ def create_ui():
             fn=on_open_history,
             inputs=[history_selector],
             outputs=[report_output, json_output, run_id_state, trace_output]
+        )
+
+        download_pdf_btn.click(
+            fn=download_pdf,
+            inputs=[run_id_state],
+            outputs=[download_pdf_btn]
+        )
+
+        send_email_btn.click(
+            fn=send_report_email_ui,
+            inputs=[run_id_state, email_input],
+            outputs=[email_status]
         )
 
         # Theme toggle: pure client-side class toggle, no Python round-trip,

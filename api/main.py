@@ -9,6 +9,17 @@ from api.routes import router
 import gradio as gr
 
 
+def _get_allowed_origins() -> list:
+    """Read ALLOWED_ORIGINS from env (comma-separated), defaulting to '*'
+    for public access. Since this app has no cookie/session auth, CORS
+    credentials are disabled rather than paired with a wildcard origin —
+    that combination is invalid per spec and browsers reject it anyway."""
+    raw = os.getenv("ALLOWED_ORIGINS", "*").strip()
+    if raw == "*" or not raw:
+        return ["*"]
+    return [origin.strip() for origin in raw.split(",") if origin.strip()]
+
+
 def create_app() -> FastAPI:
     app = FastAPI(
         title="InSyfy",
@@ -18,8 +29,8 @@ def create_app() -> FastAPI:
     
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],
-        allow_credentials=True,
+        allow_origins=_get_allowed_origins(),
+        allow_credentials=False,
         allow_methods=["*"],
         allow_headers=["*"],
     )

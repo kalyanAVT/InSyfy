@@ -8,6 +8,7 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import PydanticOutputParser
 from graph.state import CritiqueResult, SynthesisResult, ResearchPlan
 from agents.token_utils import extract_token_count
+from prompts.loader import load_prompt
 
 
 class CriticAgent:
@@ -43,37 +44,11 @@ class CriticAgent:
             f"- {sq.query}" for sq in plan.sub_queries
         ])
         
-        prompt = ChatPromptTemplate.from_template("""You are a quality critic agent.
-
-Evaluate the synthesis against the original research plan. Score strictly.
-
-{format_instructions}
-
-Original Question: {question}
-Quality Threshold: {threshold}
-
-Sub-queries from plan:
-{sub_queries}
-
-Synthesis findings:
-{findings}
-
-Overall confidence: {overall_confidence}
-Source diversity: {source_diversity}
-
-Evaluate:
-1. coverage_score: What fraction of sub-queries are addressed? (0.0-1.0)
-2. contradiction_score: Are contradictions resolved? Penalize unresolved. (0.0-1.0, higher = fewer contradictions)
-3. source_diversity_score: Are sources varied? Penalize over-reliance on one source. (0.0-1.0)
-4. confidence_score: Average confidence of findings. (0.0-1.0)
-
-quality_score = average of the four scores.
-
-gap_analysis: List specific gaps — which sub-queries are unanswered, what additional searches might help.
-
-proceed: True if quality_score >= {threshold}, else False.
-
-Respond with ONLY the JSON. No extra text.""")
+        prompt_data = load_prompt("critic")
+        prompt = ChatPromptTemplate.from_messages([
+            ("system", prompt_data["system_template"]),
+            ("human", prompt_data["user_template"])
+        ])
         
         self.last_token_usage = 0
         

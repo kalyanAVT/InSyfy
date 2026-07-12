@@ -12,6 +12,7 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import PydanticOutputParser
 from graph.state import SynthesisResult, Finding, Chunk
 from agents.token_utils import extract_token_count
+from prompts.loader import load_prompt
 
 
 class SynthesizerAgent:
@@ -83,38 +84,11 @@ class SynthesizerAgent:
         context = "\n".join(context_parts)
         sub_queries_text = "\n".join(f"- {sq}" for sq in sub_queries) if sub_queries else "(none provided)"
         
-        prompt = ChatPromptTemplate.from_template("""You are a research synthesis agent.
-
-Given a research question and text chunks from sources, produce structured findings.
-
-{format_instructions}
-
-Research Question: {question}
-
-Sub-queries being answered:
-{sub_queries}
-
-Retrieved Chunks:
-{context}
-
-Rules:
-- executive_summary: write 3-5 full sentences of prose that actually synthesize the
-  answer to the Research Question above. This must be a standalone paragraph a
-  reader could understand on its own — do NOT just concatenate or lightly rephrase
-  individual findings, and do NOT cut it off mid-sentence.
-- Each finding must be a single, specific, verifiable claim
-- sub_query: copy the EXACT text of the sub-query (from the list above) that this
-  finding primarily answers. Leave it as an empty string only if the finding truly
-  doesn't correspond to any sub-query in the list.
-- Try to produce at least one finding for every sub-query listed above, if the
-  retrieved chunks contain any relevant evidence for it
-- Link each claim to CHUNK_IDs that support it
-- Confidence: 0.0-1.0 based on source agreement (multiple sources = higher)
-- Note contradictions explicitly
-- overall_confidence: weighted average
-- source_diversity_score: 0.0-1.0, penalize single-source reliance
-
-Respond with ONLY the JSON. No extra text.""")
+        prompt_data = load_prompt("synthesizer")
+        prompt = ChatPromptTemplate.from_messages([
+            ("system", prompt_data["system_template"]),
+            ("human", prompt_data["user_template"])
+        ])
         
         self.last_token_usage = 0
         

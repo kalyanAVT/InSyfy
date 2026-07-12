@@ -23,3 +23,7 @@ class ReportResponse(BaseModel):
     chunks_retrieved: int = 0
     sources: list = []
     token_usage: Dict[str, int] = {}
+
+
+class EmailReportRequest(BaseModel):
+    to_email: str = Field(..., description="Recipient email address")

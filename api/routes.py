@@ -3,13 +3,15 @@ import time
 import json
 import traceback
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import StreamingResponse
-from api.schemas import ResearchRequest, ResearchResponse, ReportResponse
+from fastapi.responses import StreamingResponse, Response
+from api.schemas import ResearchRequest, ResearchResponse, ReportResponse, EmailReportRequest
 from api.stream import event_stream
 from graph.state import AgentState, SearchResult
 from graph.pipeline import graph
 from db.redis_client import redis_client, emit_event
 from agents.token_utils import estimate_cost
+from api.pdf_export import markdown_to_pdf_bytes
+from api.email_sender import send_report_email
 
 
 router = APIRouter()
@@ -235,6 +237,63 @@ async def get_report(run_id: str):
         sources=sources,
         token_usage=result.get("token_usage", {})
     )
+
+
+@router.get("/report/{run_id}/pdf")
+async def get_report_pdf(run_id: str):
+    """Download the report as a PDF. Generated on-demand from the same
+    markdown the report endpoint returns — not cached, so it's always
+    in sync with the latest report text for this run."""
+    state_dict = redis_client.get_state(run_id)
+    if not state_dict:
+        raise HTTPException(status_code=404, detail="Run not found")
+
+    report_markdown = state_dict.get("final_report", "")
+    if not report_markdown:
+        raise HTTPException(status_code=404, detail="No report available for this run yet")
+
+    question = state_dict.get("research_question", "")
+
+    try:
+        pdf_bytes = markdown_to_pdf_bytes(report_markdown, question)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"PDF generation failed: {str(e)}")
+
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={
+            "Content-Disposition": f'attachment; filename="insyfy_report_{run_id}.pdf"'
+        }
+    )
+
+
+@router.post("/report/{run_id}/email")
+async def email_report(run_id: str, request: EmailReportRequest):
+    """Generate the report as a PDF and email it to the given address."""
+    state_dict = redis_client.get_state(run_id)
+    if not state_dict:
+        raise HTTPException(status_code=404, detail="Run not found")
+
+    report_markdown = state_dict.get("final_report", "")
+    if not report_markdown:
+        raise HTTPException(status_code=404, detail="No report available for this run yet")
+
+    question = state_dict.get("research_question", "")
+
+    try:
+        pdf_bytes = markdown_to_pdf_bytes(report_markdown, question)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"PDF generation failed: {str(e)}")
+
+    filename = f"insyfy_report_{run_id}.pdf"
+    subject = f"InSyfy Research Report: {question[:80]}"
+
+    sent, message = send_report_email(request.to_email, subject, pdf_bytes, filename)
+    if not sent:
+        raise HTTPException(status_code=502, detail=message)
+
+    return {"sent": True, "message": message}
 
 
 @router.get("/history")
