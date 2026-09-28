@@ -1,0 +1,49 @@
+services:
+  - type: web
+    name: insyfy
+    runtime: docker
+    plan: free
+    envVars:
+      # Required — the app will run in a degraded state or fail without these
+      - key: TAVILY_API_KEY
+        sync: false
+      - key: GROQ_API_KEY
+        sync: false
+      - key: REDIS_URL
+        sync: false
+
+      # Optional — memory/RAG features degrade gracefully if left unset
+      - key: QDRANT_URL
+        sync: false
+      - key: QDRANT_API_KEY
+        sync: false
+
+      # Optional — only needed for the "email report" feature
+      - key: SMTP_HOST
+        value: smtp.gmail.com
+      - key: SMTP_PORT
+        value: "587"
+      - key: SMTP_USERNAME
+        sync: false
+      - key: SMTP_PASSWORD
+        sync: false
+      - key: SMTP_FROM_ADDRESS
+        sync: false
+
+      # Tuning — safe defaults, override in the dashboard if needed
+      - key: LLM_PROVIDER
+        value: groq
+      - key: LLM_MODEL
+        value: llama-3.3-70b-versatile
+      - key: CITATION_THRESHOLD
+        value: "0.50"
+      - key: QUALITY_THRESHOLD
+        value: "0.75"
+      - key: MAX_RETRIES
+        value: "2"
+      - key: MAX_PARALLEL_SEARCHES
+        value: "5"
+      - key: COST_PER_1K_TOKENS
+        value: "0"
+      - key: ALLOWED_ORIGINS
+        value: "*"

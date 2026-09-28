@@ -1,12 +1,3 @@
----
-title: InSyfy
-colorFrom: blue
-colorTo: green
-sdk: docker
-app_port: 7860
-pinned: false
----
-
 # InSyfy
 
 Autonomous Research & Competitive Intelligence Agent.
@@ -28,7 +19,7 @@ InSyfy is a multi-agent research system built with LangGraph that performs auton
 * Real-time progress streaming over Server-Sent Events, with per-node start/complete/error events
 * Report history with the ability to reopen any past report
 * FastAPI REST API
-* Gradio web interface with a client-side light/dark theme toggle
+* Responsive Gradio dashboard with research presets, loading states, and a saved light/dark appearance preference
 * Redis for state storage, live event logging, and caching
 * Downloadable PDF export and email delivery of any report
 
@@ -253,6 +244,9 @@ InSyfy/
 |   +-- __init__.py
 |   +-- gradio_app.py
 |
++-- tests/
+|   +-- test_dashboard_ui.py
+|
 +-- prompts/
 |   +-- __init__.py
 |   +-- loader.py
@@ -267,6 +261,7 @@ InSyfy/
 +-- README.md
 +-- Dockerfile
 +-- .dockerignore
++-- render.yaml
 ```
 
 Note: `prompts/v1/*.yaml` are loaded at runtime by `prompts/loader.py` and are the actual source of truth for the planner, synthesizer, and critic prompts — editing them changes agent behavior on the next process restart (results are cached in-process after first load). `searcher.yaml` remains informational only, since `SearchAgent` calls the Tavily API directly and has no LLM prompt of its own.
@@ -392,6 +387,18 @@ http://localhost:8000
 
 The FastAPI backend and Gradio interface are both served from this address.
 
+## Using the dashboard
+
+1. Enter a **Research question** or choose an inspiration card to fill in a sample question.
+2. Select **Quick overview**, **Balanced research**, or **Deep dive**, then click **Start research**.
+3. Follow live progress in **Agent activity**. The **Research report** panel shows a loading state until the report is ready, or a message if the run cannot finish.
+4. Select a card in **Activity History** to reopen a saved report. Cards show each run's status and quality score when available; **Refresh** updates the list.
+5. Use **Download PDF**, **Send report**, or **Structured output** after a report loads. Email delivery requires SMTP configuration.
+
+**Workspace metrics** expands to show run statistics. **Appearance** switches between dark and light themes without reloading the page, and saves your preference in the browser; new visitors start in dark mode.
+
+On desktop, the controls, report, and fixed activity history panel sit side by side. On smaller screens, the panels stack vertically. History cards support keyboard selection, and loading animations respect reduced-motion preferences.
+
 ---
 
 # API Endpoints
@@ -433,26 +440,41 @@ curl -X POST http://localhost:8000/api/v1/research \
 
 ---
 
-# Deploying to Hugging Face Spaces
+# Deploying to Render
 
-InSyfy runs as a Docker Space on Hugging Face — not the native Gradio SDK Space type, since the Gradio UI here is mounted inside a FastAPI app rather than being a standalone `gr.Blocks` app. The `Dockerfile` and the frontmatter at the top of this README handle that.
+InSyfy is configured to run as a Docker-based Web Service on Render. Render builds the `Dockerfile` at the repo root and assigns a port through the `PORT` environment variable. Both the server and the dashboard's internal API requests use that port, defaulting to `8000` locally.
 
-1. Create a new Space at huggingface.co/new-space, choosing **Docker** as the Space SDK.
-2. Push this repository to the Space's git remote (Spaces work like any git repo).
-3. In the Space's **Settings > Repository secrets**, set the following. Do not commit these to `.env` in the repo:
+Research runs use background tasks and long-lived SSE connections, so the application needs a persistent web service.
 
-| Secret | Required | Notes |
-| ------ | -------- | ----- |
-| `QDRANT_URL` | Optional | Memory features are disabled gracefully if unset |
-| `QDRANT_API_KEY` | Optional | Same as above |
+## Option A: One-click via Blueprint
+
+1. Push this repository to GitHub.
+2. In the Render dashboard: **New > Blueprint**, connect the repo. Render reads `render.yaml` and provisions the service automatically.
+3. You'll be prompted only for the environment variables marked `sync: false` in `render.yaml` — the required ones are `TAVILY_API_KEY`, `GROQ_API_KEY`, and `REDIS_URL`.
+
+## Option B: Manual setup
+
+1. Push this repository to GitHub.
+2. In the Render dashboard: **New > Web Service**, connect the repo.
+3. Runtime: **Docker**. Render auto-detects the `Dockerfile` at the repo root — no build/start command needed.
+4. Under **Environment**, add the variables below. Do not commit real values to `.env` in the repo:
+
+| Variable | Required | Notes |
+| -------- | -------- | ----- |
 | `TAVILY_API_KEY` | Required | Web search will not function without it |
 | `GROQ_API_KEY` | Required | Or set `LLM_PROVIDER=openai` and `OPENAI_API_KEY` instead |
-| `REDIS_URL` | Required | Use a managed Redis (e.g. Redis Cloud free tier) — Spaces containers don't persist a local Redis between restarts |
+| `REDIS_URL` | Required | A managed Redis (Render's own Key Value service, or an external one like Redis Cloud's free tier) both work — the app only needs a reachable `REDIS_URL` |
+| `QDRANT_URL`, `QDRANT_API_KEY` | Optional | Memory/RAG features are disabled gracefully if unset |
 | `SMTP_HOST`, `SMTP_USERNAME`, `SMTP_PASSWORD`, `SMTP_FROM_ADDRESS` | Optional | Only needed for the "email report" feature |
 | `ALLOWED_ORIGINS` | Optional | Defaults to `*` (public access) |
 
-4. The Space builds and starts automatically. It listens on port 7860 internally, matching `app_port` in the frontmatter above and `EXPOSE 7860` in the Dockerfile — if you change one, change both.
-5. First requests that use embeddings or re-ranking will download model weights (`sentence-transformers`, cross-encoder) from the Hugging Face Hub on first use. This is fast on Spaces since it's on the same network as the Hub, but expect a slower first research run after a fresh deploy or restart.
+5. Deploy. Render builds the image and starts the service; you get a `https://<service-name>.onrender.com` URL.
+
+## Things worth knowing before you rely on this for a public demo
+
+* **Free tier sleeps after inactivity.** Render's free Web Service plan spins the container down after roughly 15 minutes with no traffic, and the next request pays a cold-start cost (often 30-60+ seconds) while it spins back up. For "anyone can try it," that means a visitor's first request after a quiet period will hang before anything happens — not broken, just slow. A paid instance type removes this.
+* **First research run after any restart is slower regardless of tier** — `sentence-transformers` and the cross-encoder download their model weights on first use, not at build time.
+* **CORS defaults to `*`** (see `ALLOWED_ORIGINS` above), matching the public-access goal. Tighten it to your actual frontend's origin(s) if you ever put a custom domain in front of this.
 
 # Development
 
@@ -462,7 +484,13 @@ Freeze dependencies:
 pip freeze > requirements.txt
 ```
 
-There is no automated test suite yet. This is tracked under Roadmap below.
+Run the dashboard regression tests:
+
+```bash
+python -m pytest tests/ -q
+```
+
+These tests exercise Gradio event handlers for submission failure recovery, completed reports, history selection, PDF/email run IDs, and loading states. API responses are mocked, so this suite does not need Redis, external API keys, or SMTP and does not send email. The root-level `test_pipeline.py` and `test_qdrant.py` scripts run the research pipeline against configured services and are separate from these offline tests.
 
 ---
 
@@ -497,11 +525,17 @@ These are known, currently unresolved issues, listed here for transparency rathe
   * Prompt YAML files wired up as the actual runtime source of truth
   * CORS configuration corrected for public access
   * PDF export and email delivery of reports
-  * Deployed to Hugging Face Spaces (Docker SDK)
+  * Render deployment configuration (Docker Web Service and Blueprint)
+* Dashboard refresh
+  * Responsive layout with a fixed desktop activity history panel
+  * Research inspiration cards and selectable history cards
+  * Report, history, and metrics loading states with error recovery
+  * Saved appearance preference and reduced-motion support
+  * Automated dashboard regression tests
 
 ## Planned
 
-* Automated test suite and CI/CD pipeline
+* Broader pipeline/API test coverage and CI/CD pipeline
 * Evaluation framework
 * Weights and Biases logging
 * Multi-document research

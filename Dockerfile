@@ -1,7 +1,5 @@
-# HF Spaces (Docker SDK). The native "Gradio SDK" Space type expects a
-# bare gr.Blocks app; InSyfy mounts Gradio inside FastAPI via
-# gr.mount_gradio_app, so it needs the Docker SDK instead — this Dockerfile
-# is what that Space type runs.
+# Render runs FastAPI and the mounted Gradio UI as a persistent web service.
+# Both use Render's $PORT, falling back to 8000 for local Docker runs.
 
 FROM python:3.11-slim
 
@@ -14,16 +12,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
-RUN pip install --no-cache-dir --break-system-packages -r requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
-# HF Spaces (Docker SDK) routes traffic to port 7860 by default.
-# See app_port in the README.md Spaces frontmatter — keep both in sync.
-EXPOSE 7860
+# Documents the default; Render overrides this via $PORT at runtime.
+EXPOSE 8000
 
 # QDRANT_URL, QDRANT_API_KEY, TAVILY_API_KEY, GROQ_API_KEY, REDIS_URL, and
-# any SMTP_* vars must be set as HF Spaces "Secrets" in the Space settings
-# UI — never commit real credentials into this image or the repo.
+# any SMTP_* vars must be set as Render "Environment Variables" in the
+# service's dashboard — never commit real credentials into this image or
+# the repo.
 
-CMD ["uvicorn", "api.main:app", "--host", "0.0.0.0", "--port", "7860"]
+CMD ["sh", "-c", "uvicorn api.main:app --host 0.0.0.0 --port ${PORT:-8000}"]
